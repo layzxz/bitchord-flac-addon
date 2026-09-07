@@ -1,30 +1,6 @@
 {
   "id": "bitchord-internet-archive-flac",
   "name": "Internet Archive FLAC",
-  "version": "1.0.0",
-  "description": "Searches Internet Archive for publicly available FLAC audio and returns direct HTTP FLAC streams.",
-  "author": "Local project",
-  "type": "music",
-  "capabilities": [
-    "search",
-    "stream"
-  ],
-  "formats": [
-    "flac"
-  ],
-  "search": {
-    "method": "GET",
-    "path": "/search",
-    "query": "q"
-  },
-  "stream": {
-    "method": "GET",
-    "path": "/stream",
-    "idQuery": "id"
-  },
-  "api": {
-    "search": "/search?q={query}",
-    "stream": "/stream?id={id}"
-  },
-  "health": "/health"
+  "version": "1.1.0",
+  "resources": ["search", "stream"]
 }
