@@ -12,7 +12,7 @@ app = Flask(__name__)
 
 MANIFEST = {
     "id": "bitchord-internet-archive-flac",
-    "name": "Internet Archive Lossless",
+    "name": "Layz Add On",
     "version": "1.2.1",
     "resources": ["search", "stream"],
 }
@@ -35,7 +35,6 @@ def ia_search(query: str, rows: int = 20):
 
 
 def number_value(value):
-    """Return a numeric metadata value when IA provides one."""
     if value is None or value == "":
         return None
     match = re.search(r"\d+(?:\.\d+)?", str(value))
@@ -54,9 +53,7 @@ def first_value(item, *keys):
 
 
 def get_flac(identifier: str):
-    response = requests.get(
-        IA_METADATA.format(quote(identifier, safe="")), timeout=20
-    )
+    response = requests.get(IA_METADATA.format(quote(identifier, safe="")), timeout=20)
     response.raise_for_status()
     data = response.json()
 
@@ -64,42 +61,24 @@ def get_flac(identifier: str):
     for item in data.get("files", []):
         name = str(item.get("name", ""))
         fmt = str(item.get("format", "")).upper()
-        # Only accept an actual .flac file. Never convert another format.
-        if name.lower().endswith(".flac") and (fmt in ("", "FLAC")):
+        if name.lower().endswith(".flac") and fmt in ("", "FLAC"):
             candidates.append(item)
 
     if not candidates:
         return None
 
-    candidates.sort(
-        key=lambda x: (
-            "metadata" in str(x.get("name", "")).lower(),
-            str(x.get("name", "")),
-        )
-    )
+    candidates.sort(key=lambda x: ("metadata" in str(x.get("name", "")).lower(), str(x.get("name", ""))))
     item = candidates[0]
     filename = str(item["name"])
 
-    sample_rate = number_value(
-        first_value(item, "sample_rate", "samplerate", "sampleRate")
-    )
-    bit_depth = number_value(
-        first_value(item, "bit_depth", "bitdepth", "bitDepth")
-    )
-    bitrate = number_value(first_value(item, "bitrate", "bit_rate", "bitRate"))
-    length = number_value(item.get("length"))
-
     return {
-        "url": (
-            f"https://archive.org/download/{quote(identifier, safe='')}/"
-            f"{quote(filename, safe='')}"
-        ),
+        "url": f"https://archive.org/download/{quote(identifier, safe='')}/{quote(filename, safe='')}",
         "filename": filename,
         "size": item.get("size"),
-        "length": length,
-        "bitrate": bitrate,
-        "sampleRate": sample_rate,
-        "bitDepth": bit_depth,
+        "length": number_value(item.get("length")),
+        "bitrate": number_value(first_value(item, "bitrate", "bit_rate", "bitRate")),
+        "sampleRate": number_value(first_value(item, "sample_rate", "samplerate", "sampleRate")),
+        "bitDepth": number_value(first_value(item, "bit_depth", "bitdepth", "bitDepth")),
         "source": f"https://archive.org/details/{quote(identifier, safe='')}",
     }
 
@@ -117,14 +96,9 @@ def make_track(doc, flac):
         "audioQuality": "LOSSLESS",
         "streamURL": flac["url"],
     }
-
-    if flac.get("sampleRate") is not None:
-        track["sampleRate"] = flac["sampleRate"]
-    if flac.get("bitDepth") is not None:
-        track["bitDepth"] = flac["bitDepth"]
-    if flac.get("bitrate") is not None:
-        track["bitrate"] = flac["bitrate"]
-
+    for key in ("sampleRate", "bitDepth", "bitrate"):
+        if flac.get(key) is not None:
+            track[key] = flac[key]
     return track
 
 
@@ -148,7 +122,6 @@ def search():
     query = (request.args.get("q") or "").strip()
     if not query:
         return jsonify({"tracks": []})
-
     try:
         limit = min(max(int(request.args.get("limit", "20")), 1), 50)
     except ValueError:
@@ -157,7 +130,6 @@ def search():
     try:
         docs = ia_search(query, limit * 2).get("response", {}).get("docs", [])
         tracks = []
-
         for doc in docs:
             identifier = doc.get("identifier")
             if not identifier:
@@ -171,7 +143,6 @@ def search():
             tracks.append(make_track(doc, flac))
             if len(tracks) >= limit:
                 break
-
         return jsonify({"tracks": tracks})
     except requests.RequestException as exc:
         return jsonify({"tracks": [], "error": str(exc)}), 502
@@ -184,12 +155,10 @@ def stream(identifier):
     identifier = identifier.strip()
     if not identifier:
         return jsonify({"error": "missing id"}), 400
-
     try:
         flac = get_flac(identifier)
         if not flac:
             return jsonify({"error": "No FLAC file found for this item"}), 404
-
         result = {
             "url": flac["url"],
             "format": "flac",
@@ -202,14 +171,9 @@ def stream(identifier):
             "containerFormat": "flac",
             "encrypted": False,
         }
-
-        if flac.get("sampleRate") is not None:
-            result["sampleRate"] = flac["sampleRate"]
-        if flac.get("bitDepth") is not None:
-            result["bitDepth"] = flac["bitDepth"]
-        if flac.get("bitrate") is not None:
-            result["bitrate"] = flac["bitrate"]
-
+        for key in ("sampleRate", "bitDepth", "bitrate"):
+            if flac.get(key) is not None:
+                result[key] = flac[key]
         return jsonify(result)
     except requests.RequestException as exc:
         return jsonify({"error": str(exc)}), 502
