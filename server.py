@@ -2,6 +2,7 @@
 """BitChord addon: search Internet Archive for real FLAC files."""
 
 import os
+import re
 from urllib.parse import quote
 
 import requests
@@ -12,7 +13,7 @@ app = Flask(__name__)
 MANIFEST = {
     "id": "bitchord-internet-archive-flac",
     "name": "Internet Archive FLAC",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "resources": ["search", "stream"],
 }
 
@@ -31,6 +32,25 @@ def ia_search(query: str, rows: int = 20):
     response = requests.get(IA_SEARCH, params=params, timeout=20)
     response.raise_for_status()
     return response.json()
+
+
+def number_value(value):
+    """Return a numeric metadata value when IA provides one."""
+    if value is None or value == "":
+        return None
+    match = re.search(r"\d+(?:\.\d+)?", str(value))
+    if not match:
+        return None
+    number = float(match.group(0))
+    return int(number) if number.is_integer() else number
+
+
+def first_value(item, *keys):
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def get_flac(identifier: str):
@@ -52,9 +72,23 @@ def get_flac(identifier: str):
         return None
 
     # Prefer a normal audio FLAC over files in obvious metadata directories.
-    candidates.sort(key=lambda x: ("metadata" in str(x.get("name", "")).lower(), str(x.get("name", ""))))
+    candidates.sort(
+        key=lambda x: (
+            "metadata" in str(x.get("name", "")).lower(),
+            str(x.get("name", "")),
+        )
+    )
     item = candidates[0]
     filename = str(item["name"])
+
+    sample_rate = number_value(
+        first_value(item, "sample_rate", "samplerate", "sampleRate")
+    )
+    bit_depth = number_value(
+        first_value(item, "bit_depth", "bitdepth", "bitDepth")
+    )
+    bitrate = number_value(first_value(item, "bitrate", "bit_rate", "bitRate"))
+    length = number_value(item.get("length"))
 
     return {
         "url": (
@@ -63,25 +97,37 @@ def get_flac(identifier: str):
         ),
         "filename": filename,
         "size": item.get("size"),
-        "length": item.get("length"),
-        "bitrate": item.get("bitrate"),
+        "length": length,
+        "bitrate": bitrate,
+        "sampleRate": sample_rate,
+        "bitDepth": bit_depth,
         "source": f"https://archive.org/details/{quote(identifier, safe='')}",
     }
 
 
 def make_track(doc, flac):
     identifier = str(doc["identifier"])
-    return {
+    track = {
         "id": identifier,
         "title": str(doc.get("title") or flac["filename"]),
         "artist": str(doc.get("creator") or "Internet Archive"),
         "album": str(doc.get("album") or ""),
-        "duration": float(flac["length"]) if flac.get("length") else None,
+        "duration": flac.get("length"),
         "artworkURL": f"https://archive.org/services/img/{quote(identifier, safe='')}",
         "format": "flac",
         "audioQuality": "LOSSLESS",
         "streamURL": flac["url"],
     }
+
+    # Include technical metadata when Internet Archive provides it.
+    if flac.get("sampleRate") is not None:
+        track["sampleRate"] = flac["sampleRate"]
+    if flac.get("bitDepth") is not None:
+        track["bitDepth"] = flac["bitDepth"]
+    if flac.get("bitrate") is not None:
+        track["bitrate"] = flac["bitrate"]
+
+    return track
 
 
 @app.get("/")
@@ -147,14 +193,28 @@ def stream(identifier):
         if not flac:
             return jsonify({"error": "No FLAC file found for this item"}), 404
 
-        return jsonify({
+        result = {
             "url": flac["url"],
             "format": "flac",
             "quality": "LOSSLESS",
+            "audioQuality": "LOSSLESS",
             "mimeType": "audio/flac",
             "codec": "flac",
+            "fileCodec": "flac",
             "container": "flac",
-        })
+            "containerFormat": "flac",
+            "encrypted": False,
+        }
+
+        # Give BitChord the actual technical metadata when available.
+        if flac.get("sampleRate") is not None:
+            result["sampleRate"] = flac["sampleRate"]
+        if flac.get("bitDepth") is not None:
+            result["bitDepth"] = flac["bitDepth"]
+        if flac.get("bitrate") is not None:
+            result["bitrate"] = flac["bitrate"]
+
+        return jsonify(result)
     except requests.RequestException as exc:
         return jsonify({"error": str(exc)}), 502
     except Exception as exc:
