@@ -3,8 +3,8 @@
 
 Returns actual FLAC files and exposes their technical metadata when it can be
 read from Internet Archive metadata or the FLAC STREAMINFO block. BitChord
-uses FLAC as LOSSLESS and uses sample rate / bit depth to identify Hi-Res
-Lossless in the player.
+uses FLAC as LOSSLESS and uses the quality label plus sample rate / bit depth
+to identify Hi-Res Lossless in the player.
 """
 
 import os
@@ -19,7 +19,7 @@ app = Flask(__name__)
 MANIFEST = {
     "id": "bitchord-internet-archive-flac",
     "name": "Layz Add On",
-    "version": "1.2.2",
+    "version": "1.2.3",
     "resources": ["search", "stream"],
 }
 
@@ -59,11 +59,7 @@ def first_value(item, *keys):
 
 
 def flac_streaminfo(url):
-    """Read FLAC sample rate, channel count and bit depth from STREAMINFO.
-
-    FLAC stores STREAMINFO immediately after the fLaC marker. Only a tiny
-    ranged request is needed, so this does not download the audio file.
-    """
+    """Read FLAC sample rate and bit depth from the STREAMINFO block."""
     try:
         response = requests.get(
             url,
@@ -78,16 +74,13 @@ def flac_streaminfo(url):
         if len(data) < 42 or data[:4] != b"fLaC":
             return None, None
 
-        # STREAMINFO must be the first metadata block in a valid FLAC file.
         block_header = data[4:8]
         block_type = block_header[0] & 0x7F
         block_length = int.from_bytes(block_header[1:4], "big")
-        if block_type != 0 or block_length < 34 or len(data) < 42:
+        if block_type != 0 or block_length < 34:
             return None, None
 
         info = data[8:42]
-        # STREAMINFO bytes 10..12 contain sample-rate/channel/bit-depth:
-        # 20 bits sample rate, 3 bits channels-1, 5 bits bits-per-sample-1.
         packed = int.from_bytes(info[10:18], "big")
         sample_rate = packed >> 44
         bit_depth = ((packed >> 36) & 0x1F) + 1
@@ -99,6 +92,28 @@ def flac_streaminfo(url):
         return sample_rate, bit_depth
     except (requests.RequestException, StopIteration, ValueError):
         return None, None
+
+
+def quality_label(sample_rate, bit_depth):
+    """Return the quality text BitChord's qualityTier() understands."""
+    try:
+        sr = float(sample_rate) if sample_rate is not None else None
+    except (TypeError, ValueError):
+        sr = None
+    try:
+        bd = int(bit_depth) if bit_depth is not None else None
+    except (TypeError, ValueError):
+        bd = None
+
+    # BitChord recognizes HI-RES / HI_RES / HIRES as the lossless tier and
+    # uses the stream's bit depth/sample rate for the actual Hi-Res display.
+    # 24-bit audio is sufficient to advertise Hi-Res; 24/44.1 is still
+    # materially higher-resolution than CD 16-bit audio.
+    if bd is not None and bd >= 24:
+        return "HI_RES_LOSSLESS"
+    if sr is not None and sr > 44100 and bd is not None and bd >= 16:
+        return "HI_RES_LOSSLESS"
+    return "LOSSLESS"
 
 
 def get_flac(identifier: str):
@@ -116,7 +131,6 @@ def get_flac(identifier: str):
     if not candidates:
         return None
 
-    # Prefer the largest real FLAC when an item contains multiple renditions.
     candidates.sort(
         key=lambda x: (
             number_value(x.get("size")) or 0,
@@ -136,8 +150,6 @@ def get_flac(identifier: str):
         first_value(item, "bit_depth", "bitdepth", "bitDepth")
     )
 
-    # Internet Archive often does not expose FLAC technical fields in the
-    # item metadata. Read the tiny STREAMINFO block as a fallback.
     if sample_rate is None or bit_depth is None:
         detected_rate, detected_depth = flac_streaminfo(url)
         if sample_rate is None:
@@ -153,6 +165,7 @@ def get_flac(identifier: str):
         "bitrate": bitrate,
         "sampleRate": sample_rate,
         "bitDepth": bit_depth,
+        "quality": quality_label(sample_rate, bit_depth),
         "source": f"https://archive.org/details/{quote(identifier, safe='')}",
     }
 
@@ -167,14 +180,12 @@ def make_track(doc, flac):
         "duration": flac.get("length"),
         "artworkURL": f"https://archive.org/services/img/{quote(identifier, safe='')}",
         "format": "flac",
-        # BitChord's addon quality parser recognizes FLAC as LOSSLESS.
-        # Hi-Res Lossless is determined from the actual stream metadata.
-        "audioQuality": "LOSSLESS",
+        # IMPORTANT: AddonTrack currently reads audioQuality/format for the
+        # search-row badge. The numeric sampleRate/bitDepth fields are ignored
+        # by that model, so the Hi-Res tier must be stated here as well.
+        "audioQuality": flac.get("quality", "LOSSLESS"),
         "streamURL": flac["url"],
     }
-    for key in ("sampleRate", "bitDepth", "bitrate"):
-        if flac.get(key) is not None:
-            track[key] = flac[key]
     return track
 
 
@@ -239,8 +250,8 @@ def stream(identifier):
         result = {
             "url": flac["url"],
             "format": "flac",
-            "quality": "LOSSLESS",
-            "audioQuality": "LOSSLESS",
+            "quality": flac.get("quality", "LOSSLESS"),
+            "audioQuality": flac.get("quality", "LOSSLESS"),
             "mimeType": "audio/flac",
             "codec": "flac",
             "fileCodec": "flac",
