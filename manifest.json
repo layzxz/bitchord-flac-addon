@@ -1,6 +1,6 @@
 {
   "id": "bitchord-internet-archive-flac",
-  "name": "Internet Archive FLAC",
-  "version": "1.1.0",
+  "name": "Internet Archive Lossless",
+  "version": "1.2.1",
   "resources": ["search", "stream"]
 }
