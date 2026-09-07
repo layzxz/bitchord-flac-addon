@@ -12,8 +12,8 @@ app = Flask(__name__)
 
 MANIFEST = {
     "id": "bitchord-internet-archive-flac",
-    "name": "Internet Archive FLAC",
-    "version": "1.2.0",
+    "name": "Internet Archive Lossless",
+    "version": "1.2.1",
     "resources": ["search", "stream"],
 }
 
@@ -71,7 +71,6 @@ def get_flac(identifier: str):
     if not candidates:
         return None
 
-    # Prefer a normal audio FLAC over files in obvious metadata directories.
     candidates.sort(
         key=lambda x: (
             "metadata" in str(x.get("name", "")).lower(),
@@ -119,7 +118,6 @@ def make_track(doc, flac):
         "streamURL": flac["url"],
     }
 
-    # Include technical metadata when Internet Archive provides it.
     if flac.get("sampleRate") is not None:
         track["sampleRate"] = flac["sampleRate"]
     if flac.get("bitDepth") is not None:
@@ -160,7 +158,6 @@ def search():
         docs = ia_search(query, limit * 2).get("response", {}).get("docs", [])
         tracks = []
 
-        # Verify every returned item has a real FLAC file before exposing it.
         for doc in docs:
             identifier = doc.get("identifier")
             if not identifier:
@@ -206,7 +203,6 @@ def stream(identifier):
             "encrypted": False,
         }
 
-        # Give BitChord the actual technical metadata when available.
         if flac.get("sampleRate") is not None:
             result["sampleRate"] = flac["sampleRate"]
         if flac.get("bitDepth") is not None:
