@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""BitChord addon: search Internet Archive for real FLAC files."""
+"""BitChord addon: search Internet Archive for real FLAC files.
+
+Returns actual FLAC files and exposes their technical metadata when it can be
+read from Internet Archive metadata or the FLAC STREAMINFO block. BitChord
+uses FLAC as LOSSLESS and uses sample rate / bit depth to identify Hi-Res
+Lossless in the player.
+"""
 
 import os
 import re
@@ -13,7 +19,7 @@ app = Flask(__name__)
 MANIFEST = {
     "id": "bitchord-internet-archive-flac",
     "name": "Layz Add On",
-    "version": "1.2.1",
+    "version": "1.2.2",
     "resources": ["search", "stream"],
 }
 
@@ -52,6 +58,49 @@ def first_value(item, *keys):
     return None
 
 
+def flac_streaminfo(url):
+    """Read FLAC sample rate, channel count and bit depth from STREAMINFO.
+
+    FLAC stores STREAMINFO immediately after the fLaC marker. Only a tiny
+    ranged request is needed, so this does not download the audio file.
+    """
+    try:
+        response = requests.get(
+            url,
+            headers={"Range": "bytes=0-63"},
+            timeout=15,
+            stream=True,
+        )
+        response.raise_for_status()
+        data = next(response.iter_content(64), b"")
+        response.close()
+
+        if len(data) < 42 or data[:4] != b"fLaC":
+            return None, None
+
+        # STREAMINFO must be the first metadata block in a valid FLAC file.
+        block_header = data[4:8]
+        block_type = block_header[0] & 0x7F
+        block_length = int.from_bytes(block_header[1:4], "big")
+        if block_type != 0 or block_length < 34 or len(data) < 42:
+            return None, None
+
+        info = data[8:42]
+        # STREAMINFO bytes 10..12 contain sample-rate/channel/bit-depth:
+        # 20 bits sample rate, 3 bits channels-1, 5 bits bits-per-sample-1.
+        packed = int.from_bytes(info[10:18], "big")
+        sample_rate = packed >> 44
+        bit_depth = ((packed >> 36) & 0x1F) + 1
+
+        if not (1000 <= sample_rate <= 768000):
+            sample_rate = None
+        if not (4 <= bit_depth <= 32):
+            bit_depth = None
+        return sample_rate, bit_depth
+    except (requests.RequestException, StopIteration, ValueError):
+        return None, None
+
+
 def get_flac(identifier: str):
     response = requests.get(IA_METADATA.format(quote(identifier, safe="")), timeout=20)
     response.raise_for_status()
@@ -67,18 +116,43 @@ def get_flac(identifier: str):
     if not candidates:
         return None
 
-    candidates.sort(key=lambda x: ("metadata" in str(x.get("name", "")).lower(), str(x.get("name", ""))))
+    # Prefer the largest real FLAC when an item contains multiple renditions.
+    candidates.sort(
+        key=lambda x: (
+            number_value(x.get("size")) or 0,
+            -int("metadata" in str(x.get("name", "")).lower()),
+        ),
+        reverse=True,
+    )
     item = candidates[0]
     filename = str(item["name"])
+    url = f"https://archive.org/download/{quote(identifier, safe='')}/{quote(filename, safe='')}"
+
+    bitrate = number_value(first_value(item, "bitrate", "bit_rate", "bitRate"))
+    sample_rate = number_value(
+        first_value(item, "sample_rate", "samplerate", "sampleRate")
+    )
+    bit_depth = number_value(
+        first_value(item, "bit_depth", "bitdepth", "bitDepth")
+    )
+
+    # Internet Archive often does not expose FLAC technical fields in the
+    # item metadata. Read the tiny STREAMINFO block as a fallback.
+    if sample_rate is None or bit_depth is None:
+        detected_rate, detected_depth = flac_streaminfo(url)
+        if sample_rate is None:
+            sample_rate = detected_rate
+        if bit_depth is None:
+            bit_depth = detected_depth
 
     return {
-        "url": f"https://archive.org/download/{quote(identifier, safe='')}/{quote(filename, safe='')}",
+        "url": url,
         "filename": filename,
         "size": item.get("size"),
         "length": number_value(item.get("length")),
-        "bitrate": number_value(first_value(item, "bitrate", "bit_rate", "bitRate")),
-        "sampleRate": number_value(first_value(item, "sample_rate", "samplerate", "sampleRate")),
-        "bitDepth": number_value(first_value(item, "bit_depth", "bitdepth", "bitDepth")),
+        "bitrate": bitrate,
+        "sampleRate": sample_rate,
+        "bitDepth": bit_depth,
         "source": f"https://archive.org/details/{quote(identifier, safe='')}",
     }
 
@@ -93,6 +167,8 @@ def make_track(doc, flac):
         "duration": flac.get("length"),
         "artworkURL": f"https://archive.org/services/img/{quote(identifier, safe='')}",
         "format": "flac",
+        # BitChord's addon quality parser recognizes FLAC as LOSSLESS.
+        # Hi-Res Lossless is determined from the actual stream metadata.
         "audioQuality": "LOSSLESS",
         "streamURL": flac["url"],
     }
@@ -159,6 +235,7 @@ def stream(identifier):
         flac = get_flac(identifier)
         if not flac:
             return jsonify({"error": "No FLAC file found for this item"}), 404
+
         result = {
             "url": flac["url"],
             "format": "flac",
