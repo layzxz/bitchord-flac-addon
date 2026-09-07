@@ -1,6 +1,6 @@
 {
   "id": "bitchord-internet-archive-flac",
-  "name": "Layz FLAC Add On",
+  "name": "Layz Add On",
   "version": "1.2.1",
   "resources": ["search", "stream"]
 }
