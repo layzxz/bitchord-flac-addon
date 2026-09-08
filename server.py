@@ -9,7 +9,7 @@ app = Flask(__name__)
 MANIFEST = {
     "id": "bitchord-internet-archive-flac",
     "name": "Layz Add On",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "resources": ["search", "stream"],
 }
 IA_SEARCH = "https://archive.org/advancedsearch.php"
@@ -137,9 +137,7 @@ def artist_hint(query, title, creator):
     if q and t:
         remaining = q
         for token in t.split():
-            remaining = re.sub(
-                r"\b" + re.escape(token) + r"\b", " ", remaining
-            )
+            remaining = re.sub(r"\b" + re.escape(token) + r"\b", " ", remaining)
         remaining = re.sub(r"\s+", " ", remaining).strip()
         if remaining:
             return remaining
@@ -151,25 +149,33 @@ def artist_hint(query, title, creator):
 def make_track(doc, flac, query):
     title = str(doc.get("title") or flac["filename"])
     creator = doc.get("creator")
-    return {
+    q = flac.get("quality", "LOSSLESS")
+    track = {
         "id": str(doc["identifier"]),
         "title": title,
         "artist": artist_hint(query, title, creator),
         "album": str(doc.get("album") or ""),
         "duration": flac.get("length"),
-        "artworkURL": (
-            "https://archive.org/services/img/"
-            + quote(str(doc["identifier"]), safe="")
-        ),
+        "artworkURL": "https://archive.org/services/img/" + quote(str(doc["identifier"]), safe=""),
         "format": "flac",
-        "audioQuality": flac.get("quality", "LOSSLESS"),
-        "streamQuality": flac.get("quality", "LOSSLESS"),
+        "quality": q,
+        "audioQuality": q,
+        "streamQuality": q,
+        "codec": "flac",
+        "fileCodec": "flac",
+        "container": "flac",
+        "containerFormat": "flac",
+        "mimeType": "audio/flac",
+        "mediaType": "audio/flac",
+        "sampleRate": flac.get("sampleRate"),
+        "bitDepth": flac.get("bitDepth"),
+        "bitrate": flac.get("bitrate"),
         "streamURL": flac["url"],
     }
+    return track
 
 
 def manifest_for_mode(mode=None):
-    """Return a manifest while preserving the requested Unified-style mode."""
     if not mode:
         return MANIFEST
     result = dict(MANIFEST)
@@ -226,22 +232,25 @@ def do_stream(identifier):
         flac = get_flac(identifier)
         if not flac:
             return jsonify({"error": "No FLAC file found for this item"}), 404
+        q = flac.get("quality", "LOSSLESS")
         result = {
             "url": flac["url"],
             "format": "flac",
-            "quality": flac.get("quality", "LOSSLESS"),
-            "streamQuality": flac.get("quality", "LOSSLESS"),
-            "audioQuality": flac.get("quality", "LOSSLESS"),
-            "mimeType": "audio/flac",
+            "quality": q,
+            "streamQuality": q,
+            "audioQuality": q,
             "codec": "flac",
             "fileCodec": "flac",
             "container": "flac",
             "containerFormat": "flac",
+            "mimeType": "audio/flac",
+            "mediaType": "audio/flac",
             "encrypted": False,
+            "sampleRate": flac.get("sampleRate"),
+            "bitDepth": flac.get("bitDepth"),
+            "bitrate": flac.get("bitrate"),
+            "audioMode": "stereo",
         }
-        for k in ("sampleRate", "bitDepth", "bitrate"):
-            if flac.get(k) is not None:
-                result[k] = flac[k]
         return jsonify(result)
     except requests.RequestException as e:
         return jsonify({"error": str(e)}), 502
@@ -249,9 +258,6 @@ def do_stream(identifier):
         return jsonify({"error": str(e)}), 500
 
 
-# ---------------------------------------------------------------------------
-# Root / legacy endpoints
-# ---------------------------------------------------------------------------
 @app.get("/")
 def root():
     return jsonify(MANIFEST)
@@ -264,9 +270,7 @@ def manifest():
 
 @app.get("/health")
 def health():
-    return jsonify(
-        {"ok": True, "name": MANIFEST["name"], "version": MANIFEST["version"]}
-    )
+    return jsonify({"ok": True, "name": MANIFEST["name"], "version": MANIFEST["version"]})
 
 
 @app.get("/search")
@@ -279,18 +283,6 @@ def stream(identifier):
     return do_stream(identifier)
 
 
-# ---------------------------------------------------------------------------
-# Unified-style mode endpoints
-#
-# Examples:
-#   /quality/manifest.json
-#   /quality/search?q=...
-#   /quality/stream/ITEM_IDENTIFIER
-#
-# The mode is intentionally kept in the URL path. This means Eclipse can
-# strip only /manifest.json and retain /quality as the addon base path.
-# Any future mode can use the same structure without another addon install.
-# ---------------------------------------------------------------------------
 @app.get("/<mode>/manifest.json")
 def mode_manifest(mode):
     return jsonify(manifest_for_mode(mode))
