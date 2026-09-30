@@ -9,8 +9,9 @@ app = Flask(__name__)
 MANIFEST = {
     "id": "bitchord-internet-archive-flac",
     "name": "Layz Add On",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "resources": ["search", "stream"],
+    "settings": [{"key":"quality","type":"select","default":"lossless","options":[{"label":"Lossless","value":"lossless"},{"label":"High","value":"high"},{"label":"Low","value":"low"}]}],
 }
 IA_SEARCH = "https://archive.org/advancedsearch.php"
 IA_METADATA = "https://archive.org/metadata/{}"
@@ -69,11 +70,20 @@ def quality(sr, bd):
         bd = int(bd) if bd is not None else None
     except Exception:
         bd = None
-    return (
-        "HI_RES_LOSSLESS"
-        if (bd is not None and bd > 16) or (sr is not None and sr > 48000)
-        else "LOSSLESS"
-    )
+    # BitChord's documented negotiation tiers are LOSSLESS, HIGH, and LOW.
+    # This addon only returns actual FLAC files, so the truthful tier is LOSSLESS.
+    return "LOSSLESS"
+
+
+def quality_label(sr, bd):
+    details = []
+    if bd is not None:
+        details.append("{}-bit".format(bd))
+    if sr is not None:
+        details.append("{} kHz".format(sr / 1000))
+    is_hi_res = (bd is not None and bd > 16) or (sr is not None and sr > 48000)
+    label = "Hi-Res Lossless" if is_hi_res else "Lossless"
+    return label + (" · " + " / ".join(details) if details else "")
 
 
 def inspect(identifier, item):
@@ -158,7 +168,7 @@ def make_track(doc, flac, query):
         "duration": flac.get("length"),
         "artworkURL": "https://archive.org/services/img/" + quote(str(doc["identifier"]), safe=""),
         "format": "flac",
-        "quality": q,
+        "quality": quality_label(flac.get("sampleRate"), flac.get("bitDepth")),
         "audioQuality": q,
         "streamQuality": q,
         "codec": "flac",
@@ -236,7 +246,7 @@ def do_stream(identifier):
         result = {
             "url": flac["url"],
             "format": "flac",
-            "quality": q,
+            "quality": quality_label(flac.get("sampleRate"), flac.get("bitDepth")),
             "streamQuality": q,
             "audioQuality": q,
             "codec": "flac",
