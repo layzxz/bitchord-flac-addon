@@ -1,89 +1,110 @@
 #!/usr/bin/env python3
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
+
 import requests
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+
 MANIFEST = {
     "id": "bitchord-internet-archive-flac",
     "name": "Layz Add On",
-    "version": "1.5.0",
+    "version": "1.6.0",
     "resources": ["search", "stream"],
-    "settings": [{"key":"quality","type":"select","default":"lossless","options":[{"label":"Lossless","value":"lossless"},{"label":"High","value":"high"},{"label":"Low","value":"low"}]}],
+    "settings": [
+        {
+            "key": "quality",
+            "type": "select",
+            "default": "lossless",
+            "options": [
+                {"label": "Lossless", "value": "lossless"},
+                {"label": "High", "value": "high"},
+                {"label": "Low", "value": "low"},
+            ],
+        }
+    ],
 }
+
 IA_SEARCH = "https://archive.org/advancedsearch.php"
 IA_METADATA = "https://archive.org/metadata/{}"
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": "Layz-Add-On/1.6 BitChord"})
 
 
-def num(v):
-    if v in (None, ""):
+
+def num(value):
+    if value in (None, ""):
         return None
-    m = re.search(r"\d+(?:\.\d+)?", str(v))
-    if not m:
+    match = re.search(r"\d+(?:\.\d+)?", str(value))
+    if not match:
         return None
-    x = float(m.group(0))
-    return int(x) if x.is_integer() else x
+    number = float(match.group(0))
+    return int(number) if number.is_integer() else number
 
 
-def first(d, *keys):
-    for k in keys:
-        if d.get(k) not in (None, ""):
-            return d[k]
+
+def first(data, *keys):
+    for key in keys:
+        if data.get(key) not in (None, ""):
+            return data[key]
     return None
 
 
+
 def flac_info(url):
+    """Read FLAC STREAMINFO from the first bytes without downloading the file."""
     try:
-        r = requests.get(
+        response = SESSION.get(
             url,
             headers={"Range": "bytes=0-63"},
-            timeout=15,
+            timeout=(5, 12),
             stream=True,
         )
-        r.raise_for_status()
-        b = next(r.iter_content(64), b"")
-        r.close()
-        if len(b) < 42 or b[:4] != b"fLaC":
+        response.raise_for_status()
+        data = response.raw.read(64)
+        response.close()
+
+        if len(data) < 26 or data[:4] != b"fLaC":
             return None, None
-        h = b[4:8]
-        if (h[0] & 0x7f) != 0 or int.from_bytes(h[1:4], "big") < 34:
+
+        block_type = data[4] & 0x7F
+        block_length = int.from_bytes(data[5:8], "big")
+        if block_type != 0 or block_length < 34 or len(data) < 26:
             return None, None
-        p = int.from_bytes(b[18:26], "big")
-        sr = p >> 44
-        bd = ((p >> 36) & 0x1f) + 1
-        return (
-            sr if 1000 <= sr <= 768000 else None,
-            bd if 4 <= bd <= 32 else None,
-        )
-    except (requests.RequestException, StopIteration, ValueError):
+
+        packed = int.from_bytes(data[18:26], "big")
+        sample_rate = packed >> 44
+        bit_depth = ((packed >> 36) & 0x1F) + 1
+
+        if not 1000 <= sample_rate <= 768000:
+            sample_rate = None
+        if not 4 <= bit_depth <= 32:
+            bit_depth = None
+        return sample_rate, bit_depth
+    except requests.RequestException:
         return None, None
 
 
+
 def quality(sr, bd):
-    try:
-        sr = float(sr) if sr is not None else None
-    except Exception:
-        sr = None
-    try:
-        bd = int(bd) if bd is not None else None
-    except Exception:
-        bd = None
-    # BitChord's documented negotiation tiers are LOSSLESS, HIGH, and LOW.
-    # This addon only returns actual FLAC files, so the truthful tier is LOSSLESS.
+    # This addon only returns real FLAC, so its protocol tier is LOSSLESS.
     return "LOSSLESS"
+
 
 
 def quality_label(sr, bd):
     details = []
     if bd is not None:
-        details.append("{}-bit".format(bd))
+        details.append(f"{bd}-bit")
     if sr is not None:
-        details.append("{} kHz".format(sr / 1000))
-    is_hi_res = (bd is not None and bd > 16) or (sr is not None and sr > 48000)
-    label = "Hi-Res Lossless" if is_hi_res else "Lossless"
-    return label + (" · " + " / ".join(details) if details else "")
+        details.append(f"{sr / 1000:g} kHz")
+    hi_res = (bd is not None and bd > 16) or (sr is not None and sr > 48000)
+    label = "Hi-Res Lossless" if hi_res else "Lossless"
+    return label + (f" · {' / '.join(details)}" if details else "")
+
 
 
 def inspect(identifier, item):
@@ -92,16 +113,20 @@ def inspect(identifier, item):
         f"https://archive.org/download/{quote(identifier, safe='')}/"
         f"{quote(name, safe='')}"
     )
+
     sr = num(first(item, "sample_rate", "samplerate", "sampleRate"))
     bd = num(first(item, "bit_depth", "bitdepth", "bitDepth"))
+
+    # Only probe the actual FLAC header when IA metadata does not already tell us.
     if sr is None or bd is None:
-        ds, dd = flac_info(url)
-        sr = sr if sr is not None else ds
-        bd = bd if bd is not None else dd
+        detected_sr, detected_bd = flac_info(url)
+        sr = sr if sr is not None else detected_sr
+        bd = bd if bd is not None else detected_bd
+
     return {
         "url": url,
         "filename": name,
-        "size": item.get("size"),
+        "size": num(item.get("size")),
         "length": num(item.get("length")),
         "bitrate": num(first(item, "bitrate", "bit_rate", "bitRate")),
         "sampleRate": sr,
@@ -110,162 +135,181 @@ def inspect(identifier, item):
     }
 
 
+
 def get_flac(identifier):
-    r = requests.get(
+    response = SESSION.get(
         IA_METADATA.format(quote(identifier, safe="")),
-        timeout=20,
+        timeout=(5, 20),
     )
-    r.raise_for_status()
-    data = r.json()
+    response.raise_for_status()
+    data = response.json()
+
     candidates = []
     for item in data.get("files", []):
         name = str(item.get("name", ""))
-        fmt = str(item.get("format", "")).upper()
-        if name.lower().endswith(".flac") and fmt in ("", "FLAC"):
-            candidates.append(inspect(identifier, item))
+        if not name.lower().endswith(".flac"):
+            continue
+        candidates.append((name, item))
+
     if not candidates:
         return None
-    candidates.sort(
-        key=lambda x: (
-            int((x.get("bitDepth") or 0) > 16),
-            x.get("bitDepth") or 0,
-            x.get("sampleRate") or 0,
-            num(x.get("size")) or 0,
+
+    # Prefer the largest FLAC first, then inspect the best few in parallel.
+    candidates.sort(key=lambda pair: num(pair[1].get("size")) or 0, reverse=True)
+    candidates = candidates[:12]
+
+    inspected = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [
+            pool.submit(inspect, identifier, item)
+            for _, item in candidates
+        ]
+        for future in as_completed(futures):
+            try:
+                inspected.append(future.result())
+            except Exception:
+                pass
+
+    if not inspected:
+        return None
+
+    inspected.sort(
+        key=lambda item: (
+            int((item.get("bitDepth") or 0) > 16),
+            item.get("bitDepth") or 0,
+            item.get("sampleRate") or 0,
+            item.get("size") or 0,
         ),
         reverse=True,
     )
-    return candidates[0]
+    return inspected[0]
 
 
-def normalized(s):
-    return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+
+def normalized(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+
 
 
 def artist_hint(query, title, creator):
-    q = normalized(query)
-    t = normalized(title)
-    if q and t:
-        remaining = q
-        for token in t.split():
-            remaining = re.sub(r"\b" + re.escape(token) + r"\b", " ", remaining)
-        remaining = re.sub(r"\s+", " ", remaining).strip()
-        if remaining:
-            return remaining
+    # IA metadata is inconsistent. Keep the real creator when available.
     if isinstance(creator, list):
         return str(creator[0]) if creator else "Internet Archive"
-    return str(creator or "Internet Archive")
+    if creator:
+        return str(creator)
+    return "Internet Archive"
 
 
-def make_track(doc, flac, query):
+
+def make_track(doc, flac):
+    identifier = str(doc["identifier"])
     title = str(doc.get("title") or flac["filename"])
     creator = doc.get("creator")
-    q = flac.get("quality", "LOSSLESS")
-    track = {
-        "id": str(doc["identifier"]),
+    tier = flac.get("quality", "LOSSLESS")
+
+    return {
+        "id": identifier,
         "title": title,
-        "artist": artist_hint(query, title, creator),
+        "artist": artist_hint("", title, creator),
         "album": str(doc.get("album") or ""),
         "duration": flac.get("length"),
-        "artworkURL": "https://archive.org/services/img/" + quote(str(doc["identifier"]), safe=""),
+        "artworkURL": f"https://archive.org/services/img/{quote(identifier, safe='')}",
         "format": "flac",
+        "audioQuality": tier,
         "quality": quality_label(flac.get("sampleRate"), flac.get("bitDepth")),
-        "audioQuality": q,
-        "streamQuality": q,
-        "codec": "flac",
-        "fileCodec": "flac",
-        "container": "flac",
-        "containerFormat": "flac",
-        "mimeType": "audio/flac",
-        "mediaType": "audio/flac",
         "sampleRate": flac.get("sampleRate"),
         "bitDepth": flac.get("bitDepth"),
         "bitrate": flac.get("bitrate"),
         "streamURL": flac["url"],
     }
-    return track
 
-
-def manifest_for_mode(mode=None):
-    if not mode:
-        return MANIFEST
-    result = dict(MANIFEST)
-    result["mode"] = mode
-    return result
 
 
 def do_search():
-    query = (request.args.get("q") or request.args.get("query") or "").strip()
+    query = (request.args.get("q") or "").strip()
     if not query:
         return jsonify({"tracks": []})
+
+    # BitChord does not require a limit parameter; it trims the returned rows.
     try:
-        limit = min(max(int(request.args.get("limit", "20")), 1), 50)
+        limit = min(max(int(request.args.get("limit", "20")), 1), 30)
     except ValueError:
         limit = 20
+
     try:
-        docs = requests.get(
+        response = SESSION.get(
             IA_SEARCH,
             params={
                 "q": f"(mediatype:audio) AND ({query})",
                 "fl[]": ["identifier", "title", "creator", "album", "year"],
-                "rows": limit * 2,
+                "rows": min(limit * 4, 80),
                 "page": 1,
                 "output": "json",
             },
-            timeout=20,
-        ).json().get("response", {}).get("docs", [])
-        tracks = []
+            timeout=(5, 20),
+        )
+        response.raise_for_status()
+        docs = response.json().get("response", {}).get("docs", [])
+    except (requests.RequestException, ValueError) as exc:
+        return jsonify({"tracks": [], "error": str(exc)}), 502
+
+    tracks = []
+    # Resolve several IA items concurrently so BitChord does not wait through
+    # a serial metadata request for every non-FLAC search hit.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {}
         for doc in docs:
             identifier = doc.get("identifier")
-            if not identifier:
-                continue
+            if identifier:
+                futures[pool.submit(get_flac, str(identifier))] = doc
+
+        for future in as_completed(futures):
+            doc = futures[future]
             try:
-                flac = get_flac(str(identifier))
+                flac = future.result()
             except requests.RequestException:
+                continue
+            except Exception:
                 continue
             if not flac:
                 continue
-            tracks.append(make_track(doc, flac, query))
+
+            tracks.append(make_track(doc, flac))
             if len(tracks) >= limit:
                 break
-        return jsonify({"tracks": tracks})
-    except requests.RequestException as e:
-        return jsonify({"tracks": [], "error": str(e)}), 502
-    except Exception as e:
-        return jsonify({"tracks": [], "error": str(e)}), 500
+
+    return jsonify({"tracks": tracks})
+
 
 
 def do_stream(identifier):
     identifier = (identifier or "").strip()
     if not identifier:
         return jsonify({"error": "missing id"}), 400
+
     try:
         flac = get_flac(identifier)
-        if not flac:
-            return jsonify({"error": "No FLAC file found for this item"}), 404
-        q = flac.get("quality", "LOSSLESS")
-        result = {
-            "url": flac["url"],
-            "format": "flac",
-            "quality": quality_label(flac.get("sampleRate"), flac.get("bitDepth")),
-            "streamQuality": q,
-            "audioQuality": q,
-            "codec": "flac",
-            "fileCodec": "flac",
-            "container": "flac",
-            "containerFormat": "flac",
-            "mimeType": "audio/flac",
-            "mediaType": "audio/flac",
-            "encrypted": False,
-            "sampleRate": flac.get("sampleRate"),
-            "bitDepth": flac.get("bitDepth"),
-            "bitrate": flac.get("bitrate"),
-            "audioMode": "stereo",
-        }
-        return jsonify(result)
-    except requests.RequestException as e:
-        return jsonify({"error": str(e)}), 502
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except requests.RequestException as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    if not flac:
+        return jsonify({"error": "No FLAC file found for this item"}), 404
+
+    return jsonify({
+        "url": flac["url"],
+        "format": "flac",
+        "quality": quality_label(flac.get("sampleRate"), flac.get("bitDepth")),
+        "audioQuality": flac.get("quality", "LOSSLESS"),
+        "codec": "flac",
+        "container": "flac",
+        "manifest": "none",
+        "encrypted": False,
+        "sampleRate": flac.get("sampleRate"),
+        "bitDepth": flac.get("bitDepth"),
+        "bitrate": flac.get("bitrate"),
+        "audioMode": "stereo",
+    })
+
 
 
 @app.get("/")
@@ -293,19 +337,10 @@ def stream(identifier):
     return do_stream(identifier)
 
 
-@app.get("/<mode>/manifest.json")
-def mode_manifest(mode):
-    return jsonify(manifest_for_mode(mode))
-
-
-@app.get("/<mode>/search")
-def mode_search(mode):
-    return do_search()
-
-
-@app.get("/<mode>/stream/<path:identifier>")
-def mode_stream(mode, identifier):
-    return do_stream(identifier)
+# Compatibility with older addon examples that used /stream?id=...
+@app.get("/stream")
+def stream_query():
+    return do_stream(request.args.get("id"))
 
 
 if __name__ == "__main__":
